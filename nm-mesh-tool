@@ -112,7 +112,6 @@ else
     done
 fi
 
-echo ""
 echo "Using Wi-Fi interface: $if_name"
 echo ""
 
@@ -154,6 +153,7 @@ if [[ "$choice" != "new" && "$choice" -ge 1 && "$choice" -le ${#networks[@]} ]];
 else
     read -rp "Enter new mesh ID: " ssid
     chan_list=$(iwlist wlan0 channel | grep "Channel" | while IFS= read -r line; do (echo "$line" | cut -c 19- | cut -d" " -f 1 | echo $((10#$(cat -))) ); done)
+    echo ""
     echo "Your Wi-Fi hardware supports these channels:"
     echo $chan_list
     i=1
@@ -219,6 +219,7 @@ done
 
 # Create the mesh connection
 echo "Creating mesh connection..."
+echo ""
 sudo nmcli con add con-name "$conn_name" ifname "$if_name" type wifi ssid "$ssid" ip4 "$ip4" > /dev/null
 
 # Set mode to mesh and channel
@@ -238,5 +239,21 @@ else
 fi
 
 echo "Mesh connection '$conn_name' created successfully.  You can activate it using:"
-echo "  sudo nmcli connection up \"$conn_name\""
-
+i=1
+while true; do
+    if [[ "$i" -ge 4 ]]; then
+        echo "Error: Too many invalid choices" &>2
+        exit 1
+    fi
+    read -rp "Would you like to connect now? (yes/no) " choice
+    if [[ "$choice" = "no" ]]; then
+        echo "You can connect manually later with"
+        echo "  sudo nmcli connection up \"$conn_name\""
+        exit 0
+    fi
+    if [[ "$choice = "yes" ]]; then
+        timeout 5s sudo nmcli connection up "$conn_name"
+        exit 0
+    fi
+    echo "Invalid choice.  Please type yes to connect or no to quit" 
+done
