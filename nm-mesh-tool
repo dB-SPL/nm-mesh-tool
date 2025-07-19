@@ -112,9 +112,12 @@ else
     done
 fi
 
-echo "\nUsing Wi-Fi interface: $if_name\n"
+echo ""
+echo "Using Wi-Fi interface: $if_name"
+echo ""
 
 echo "Scanning for mesh networks..."
+echo ""
 sudo nmcli device wifi rescan ifname "$if_name" >/dev/null
 sleep 5
 
@@ -125,7 +128,7 @@ if [[ ${#networks[@]} -eq 0 ]]; then
     echo "No existing mesh networks found."
     choice="new"
 else
-    echo "Available Mesh Networks:"
+    echo "Available mesh networks:"
     echo "Mesh ID, Channel, Security, Mode"
     i=1
     for line in "${networks[@]}"; do
