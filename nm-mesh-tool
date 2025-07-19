@@ -88,7 +88,6 @@ if_list=$(sudo nmcli -t -f DEVICE,TYPE device | grep ":wifi" | cut -d: -f1)
 # Interfaces that support mesh
 mesh_if_list=()
 for iface in $if_list; do
-    # echo "Verifying $iface"
     if check_mesh_support "$iface"; then
         mesh_if_list+=("$iface")
     fi
@@ -121,7 +120,7 @@ sleep 5
 
 # Gather existing mesh networks
 mapfile -t networks < <(sudo nmcli -f SSID,CHAN,SECURITY,MODE device wifi list ifname "$if_name" | grep -w Mesh | awk '{$1=$1};1' | uniq)
-#mapfile -t networks < <(sudo nmcli -f SSID,CHAN,SECURITY,MODE device wifi list ifname "$if_name" | grep -w Mesh "Mesh" | awk '{$1=$1};1')
+
 if [[ ${#networks[@]} -eq 0 ]]; then
     echo "No existing mesh networks found."
     choice="new"
@@ -140,7 +139,7 @@ else
     fi
 fi
 
-# Get SSID, channel, and security
+# Get mesh ID, channel, and security
 if [[ "$choice" != "new" && "$choice" -ge 1 && "$choice" -le ${#networks[@]} ]]; then
     selected="${networks[$((choice - 1))]}"
     ssid=$(awk '{print $1}' <<< "$selected")
@@ -150,7 +149,7 @@ if [[ "$choice" != "new" && "$choice" -ge 1 && "$choice" -le ${#networks[@]} ]];
         security="sae"
     fi
 else
-    read -rp "Enter new mesh SSID: " ssid
+    read -rp "Enter new mesh ID: " ssid
     chan_list=$(iwlist wlan0 channel | grep "Channel" | while IFS= read -r line; do (echo "$line" | cut -c 19- | cut -d" " -f 1 | echo $((10#$(cat -))) ); done)
     echo "Your Wi-Fi hardware supports these channels:"
     echo $chan_list
@@ -164,11 +163,7 @@ else
         echo "$chan_list" | grep -q "$chan" && break
         ((i++))
     done
-    if [[ "$chan" -ge 32 ]]; then
-        band="a"
-    else
-        band="bg"
-    fi
+
     read -rp "Enter security type (sae or none): " security
     if [[ "$security" != "none" && "$security" != "sae" ]]; then
         echo "Invalid choice, defaulting to \"sae\"".
