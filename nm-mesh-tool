@@ -1,0 +1,244 @@
+#!/bin/bash
+
+set -e
+
+# Check for sudo permission
+can_sudo="false"
+sudo true && can_sudo="true"
+if [[ "$can_sudo" != "true" ]]; then
+    echo "Error: insufficient permissions - This script requires sudo permission to make changes to network settings." >&2
+    exit 1
+fi
+
+
+validate_cidr() {
+    local cidr="$1"
+
+    # Match IPv4/CIDR format
+    if [[ ! "$cidr" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]{1,2})$ ]]; then
+        return 1
+    fi
+
+    local ip="${cidr%/*}"
+    local prefix="${cidr#*/}"
+
+    # Check prefix range
+    if ((prefix < 0 || prefix > 32)); then
+        return 1
+    fi
+
+    # Check each octet of IP
+    IFS='.' read -r o1 o2 o3 o4 <<< "$ip"
+    for octet in $o1 $o2 $o3 $o4; do
+        if ((octet < 0 || octet > 255)); then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+check_mesh_support() {
+    local INTERFACE="$1"
+    rm /tmp/mesh_if 2>/dev/null
+    touch /tmp/mesh_if
+
+    # Get the PHY name from the interface
+    local PHY=$(iw dev "$INTERFACE" info 2>/dev/null | awk '/wiphy/ {print "phy"$2}')
+
+    if [ -z "$PHY" ]; then
+        # echo "Error: Could not determine physical device for interface '$INTERFACE'"
+        return 1
+    fi
+
+    # Extract and print supported interface modes
+    local in_modes=0
+    iw phy "$PHY" info | while IFS= read -r line; do
+        if [[ "$line" =~ ^[[:space:]]*Supported\ interface\ modes: ]]; then
+            in_modes=1
+            continue
+        fi
+        if [[ $in_modes -eq 1 ]]; then
+            if [[ "$line" =~ ^[[:space:]]*\* ]]; then
+                mode=$(echo "$line" | sed -E 's/^[[:space:]]*\*\s*//')
+                if [[ "$mode" = "mesh point" ]]; then
+                    echo "$INTERFACE" > /tmp/mesh_if
+                    sleep 1
+                fi
+            else
+                break
+            fi
+        fi
+    done
+    local supported=$(cat /tmp/mesh_if)
+    if [[ "$supported" = "" ]]; then
+        # echo "$INTERFACE does not support mesh"
+        rm /tmp/mesh_if
+        return 1
+    else
+        # echo "$INTERFACE supports mesh"
+        rm /tmp/mesh_if
+        return 0
+    fi
+}
+
+# Get list of Wi-Fi interfaces
+if_list=$(sudo nmcli -t -f DEVICE,TYPE device | grep ":wifi" | cut -d: -f1)
+
+# Interfaces that support mesh
+mesh_if_list=()
+for iface in $if_list; do
+    # echo "Verifying $iface"
+    if check_mesh_support "$iface"; then
+        mesh_if_list+=("$iface")
+    fi
+done
+
+echo "The following Wi-Fi interfaces are supported: "
+echo ${mesh_if_list[@]}
+echo ""
+
+if  [ "${#mesh_if_list[@]}" -eq 1 ]; then
+    if_name=${mesh_if_list[@]}
+else
+    i=1
+    while true; do
+        if [[ "$i" -ge 4 ]]; then
+            echo "Error: Not a valid interface" &>2
+            exit 1
+        fi
+        read -rp "Which interface shoud be used for the mesh?" if_name
+        echo ${mesh_if_list[@]} | grep -q "$if_name" && break
+        ((i++))
+    done
+fi
+
+echo "\nUsing Wi-Fi interface: $if_name\n"
+
+echo "Scanning for mesh networks..."
+sudo nmcli device wifi rescan ifname "$if_name" >/dev/null
+sleep 5
+
+# Gather existing mesh networks
+mapfile -t networks < <(sudo nmcli -f SSID,CHAN,SECURITY,MODE device wifi list ifname "$if_name" | grep -w Mesh | awk '{$1=$1};1' | uniq)
+#mapfile -t networks < <(sudo nmcli -f SSID,CHAN,SECURITY,MODE device wifi list ifname "$if_name" | grep -w Mesh "Mesh" | awk '{$1=$1};1')
+if [[ ${#networks[@]} -eq 0 ]]; then
+    echo "No existing mesh networks found."
+    choice="new"
+else
+    echo "Available Mesh Networks:"
+    echo "Mesh ID, Channel, Security, Mode"
+    i=1
+    for line in "${networks[@]}"; do
+        echo "$i) $line"
+        ((i++))
+    done
+    echo "$i) Create a new mesh network"
+    read -rp "Select a network (1-${#networks[@]}) or $i to create a new one: " choice
+    if [[ "$choice" == "$i" ]]; then
+        choice="new"
+    fi
+fi
+
+# Get SSID, channel, and security
+if [[ "$choice" != "new" && "$choice" -ge 1 && "$choice" -le ${#networks[@]} ]]; then
+    selected="${networks[$((choice - 1))]}"
+    ssid=$(awk '{print $1}' <<< "$selected")
+    chan=$(awk '{print $2}' <<< "$selected")
+    security=$(awk '{for (i=3; i<NF; i++) printf $i " "; print ""}' <<< "$selected" | xargs)
+    if [[ "$security" = "WPA3" ]]; then
+        security="sae"
+    fi
+else
+    read -rp "Enter new mesh SSID: " ssid
+    chan_list=$(iwlist wlan0 channel | grep "Channel" | while IFS= read -r line; do (echo "$line" | cut -c 19- | cut -d" " -f 1 | echo $((10#$(cat -))) ); done)
+    echo "Your Wi-Fi hardware supports these channels:"
+    echo $chan_list
+    i=1
+    while [ true ]; do
+        if [[ $"i" -ge 4 ]]; then
+            echo "Error: Too many failed attempts to select a channel " >&2
+            exit 1
+        fi
+        read -rp "Enter Wi-Fi channel. " chan
+        echo "$chan_list" | grep -q "$chan" && break
+        ((i++))
+    done
+    if [[ "$chan" -ge 32 ]]; then
+        band="a"
+    else
+        band="bg"
+    fi
+    read -rp "Enter security type (sae or none): " security
+    if [[ "$security" != "none" && "$security" != "sae" ]]; then
+        echo "Invalid choice, defaulting to \"sae\"".
+        security="sae"
+    fi
+fi
+if [[ "$chan" -ge 32 ]]; then
+    band="a"
+else
+    band="bg"
+fi
+
+
+# Prompt for IP address
+i=1
+while true; do
+    if [[ "$i" -ge 4 ]]; then
+        echo "Error: Too many failed attempts to set IP address." >&2
+        exit 1
+    fi
+    read -rp "Enter static IP address in CIDR format (e.g., 192.168.1.10/24): " ip4
+    if validate_cidr "$ip4"; then
+        break
+    else
+        echo "Invalid CIDR format. Please try again."
+        ((i++))
+    fi
+done
+
+# Prompt for connection name
+i=1
+while [ true ]; do
+    if [[ "$i" -ge 4 ]]; then
+        echo "Error: Too many failed attempts to set connection name." >&2
+        exit 1
+    fi
+    read -rp "Enter connection name (e.g., mesh-conn): " conn_name
+    # Check for existing connection with same name
+    if nmcli -t -f NAME con show | grep -q "^$conn_name$"; then
+        read -rp "Connection '$conn_name' already exists. Would you like to replace it? (yes/no) " replace_conn
+        if [[ "$replace_conn" = "yes" ]]; then
+            sudo nmcli con delete "$conn_name" > /dev/null
+            break
+        fi
+        ((i++))
+    else
+        break
+    fi
+done
+
+# Create the mesh connection
+echo "Creating mesh connection..."
+sudo nmcli con add con-name "$conn_name" ifname "$if_name" type wifi ssid "$ssid" ip4 "$ip4" > /dev/null
+
+# Set mode to mesh and channel
+sudo nmcli con modify "$conn_name" wifi.band "$band" > /dev/null
+sudo nmcli con modify "$conn_name" wifi.channel "$chan" > /dev/null
+sudo nmcli con modify "$conn_name" wifi.mode mesh > /dev/null
+sudo nmcli con modify "$conn_name" ipv4.method manual > /dev/null
+sudo nmcli con modify "$conn_name" ipv6.method auto > /dev/null
+
+# Configure security
+if [[ "$security" == "sae" ]]; then
+    read -rsp "Enter SAE passphrase: " psk
+    sudo nmcli con modify "$conn_name" wifi-sec.key-mgmt sae > /dev/null
+    sudo nmcli con modify "$conn_name" wifi-sec.psk "$psk" > /dev/null
+else
+    sudo nmcli con modify "$conn_name" wifi-sec.key-mgmt none > /dev/null
+fi
+
+echo "Mesh connection '$conn_name' created successfully.  You can activate it using:"
+echo "  sudo nmcli connection up \"$conn_name\""
+
