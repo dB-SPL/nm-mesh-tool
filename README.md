@@ -9,6 +9,6 @@ Once you have sucessfully connected to a network, it will persist across reboots
 
 To use, simply download the script, and make it executable with
 
-```https://raw.githubusercontent.com/dB-SPL/nm-mesh-tool/refs/heads/main/nm-mesh-tool
+```wget https://raw.githubusercontent.com/dB-SPL/nm-mesh-tool/refs/heads/main/nm-mesh-tool
 chmod +x nm-mesh-tool
 ./nm-mesh-tool```
